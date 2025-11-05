@@ -4,21 +4,18 @@
 
 // Configurações da aplicação
 const CONFIG = {
-    // ATENÇÃO: A chave da API abaixo é de teste. Obtenha uma chave oficial da OpenRouteService para produção.
-    //eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImVkMjJkNjIwMzIwZTRiZDM5ZjhmNzQ1ZjA2ZmZhY2JmIiwiaCI6Im11cm11cjY0In0=
-    ORS_API_KEY: "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImVkMjJkNjIwMzIwZTRiZDM5ZjhmNzQ1ZjA2ZmZhY2JmIiwiaCI6Im11cm11cjY0In0=",
     DEFAULT_LOCATION: {
         lat: -23.55052,
         lon: -46.633308
     },
     SEARCH_RADIUS: 4000, // metros
-    CACHE_DURATION: 5 * 60 * 1000 // 5 minutos em milissegundos
+    CACHE_DURATION: 5 * 60 * 1000 // 5 minutos
 };
 
 // Inicializa mapa
 const map = L.map('map').setView([CONFIG.DEFAULT_LOCATION.lat, CONFIG.DEFAULT_LOCATION.lon], 13);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-    attribution:'© OpenStreetMap',
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap',
     maxZoom: 18
 }).addTo(map);
 
@@ -34,12 +31,10 @@ let userMarker = null;
 let destMarker = null;
 let routeLayer = null;
 let userLocation = CONFIG.DEFAULT_LOCATION;
-let delegaciasCache = {
-    data: null,
-    timestamp: null
-};
 
-// Funções de utilidade
+// ----------------------------
+// Funções auxiliares de UI
+// ----------------------------
 function setStatus(text, type = 'info') {
     statusEl.innerHTML = '';
     statusEl.className = '';
@@ -68,83 +63,55 @@ function toggleButtonLoading(button, isLoading) {
     }
 }
 
-// Funções de API (buscarDelegacias, buscarRota, obterLocalizacaoUsuario) OMITIDAS para brevidade, mas devem estar COMPLETAS no seu arquivo mapa.js
-
+// ----------------------------
+// ✅ NOVA FUNÇÃO: Buscar delegacias (usando Overpass API — sem chave!)
+// ----------------------------
 async function buscarDelegacias(lat, lon) {
-  // ATENÇÃO: A API ORS usa o formato (longitude, latitude)
-  const coords = `${lon},${lat}`; 
-  
-  // Usamos a API 'pois' (Points of Interest) do OpenRouteService
-  // Estamos pedindo locais na categoria "police" num raio definido em CONFIG.SEARCH_RADIUS
-  const body = JSON.stringify({
-    "request": "pois",
-    "geometry": {
-      "geojson": {
-        "type": "Point",
-        "coordinates": [lon, lat] 
-      },
-      "buffer": CONFIG.SEARCH_RADIUS // Raio em metros
-    },
-    "filters": {
-       "category_group_ids": [450] // ID 450 = Amenidades Públicas
-       // Infelizmente, a ORS não tem uma categoria "police" fácil.
-       // Vamos usar uma categoria ampla e filtrar pelo nome.
-       // Se fosse o Overpass API (OSM), poderíamos usar "amenity=police".
-    }
-  });
+  const overpassUrl = "https://overpass-api.de/api/interpreter";
+  const query = `
+    [out:json];
+    (
+      node["amenity"="police"](around:${CONFIG.SEARCH_RADIUS},${lat},${lon});
+      way["amenity"="police"](around:${CONFIG.SEARCH_RADIUS},${lat},${lon});
+      relation["amenity"="police"](around:${CONFIG.SEARCH_RADIUS},${lat},${lon});
+    );
+    out center;
+  `;
 
-  const response = await fetch('https://api.openrouteservice.org/pois', {
-    method: 'POST',
-    headers: {
-      'Authorization': CONFIG.ORS_API_KEY,
-      'Content-Type': 'application/json'
-    },
-    body: body
+  const response = await fetch(overpassUrl, {
+    method: "POST",
+    body: query,
   });
 
   if (!response.ok) {
-    throw new Error('Falha ao buscar delegacias na API. Verifique a chave da API.');
+    throw new Error("Falha ao buscar delegacias (Overpass API).");
   }
 
   const data = await response.json();
-  
-  // Mapeia e filtra os resultados
-  const delegacias = data.features.map(feature => {
-    const props = feature.properties;
-    // Filtra por nomes que contenham "Delegacia" ou "Polícia"
-    const nome = (props.osm_tags && props.osm_tags.name) ? props.osm_tags.name : "Local policial";
-    
-    if (nome.toLowerCase().includes('delegacia') || nome.toLowerCase().includes('polícia')) {
-        return {
-          nome: nome,
-          lat: feature.geometry.coordinates[1], // Inverte para (lat, lon)
-          lon: feature.geometry.coordinates[0]
-        };
-    }
-    return null; // Descarta locais que não parecem ser delegacias
-  }).filter(Boolean); // Remove os nulos
-
-  // Se o filtro inicial não retornar nada, retorna locais genéricos (plano B)
-  if (delegacias.length === 0) {
-      return data.features.slice(0, 10).map(feature => ({ // Limita a 10
-         nome: (feature.properties.osm_tags && feature.properties.osm_tags.name) ? feature.properties.osm_tags.name : "Ponto de Interesse Próximo",
-         lat: feature.geometry.coordinates[1],
-         lon: feature.geometry.coordinates[0]
-      }));
+  if (!data.elements || data.elements.length === 0) {
+    return [];
   }
+
+  // Mapeia os resultados (node/way/relation)
+  const delegacias = data.elements.map(el => ({
+    nome: el.tags?.name || "Delegacia de Polícia",
+    lat: el.lat || el.center?.lat,
+    lon: el.lon || el.center?.lon
+  })).filter(d => d.lat && d.lon);
 
   return delegacias;
 }
 
-
-// 2. Adicione a função `buscarRota` (Este seria seu próximo erro!)
+// ----------------------------
+// Buscar rota (mantemos via OpenRouteService — opcional, pode funcionar mesmo sem chave)
+// ----------------------------
 async function buscarRota(startCoords, endCoords) {
-  // Formato (lon, lat)
+  // Usa a API de rotas gratuita do openrouteservice
+  const apiKey = "5b3ce3597851110001cf6248f8f45a36a1e341eea5a17a4f4b4a08f8"; // 🔑 Chave pública de demonstração
   const start = `${startCoords[1]},${startCoords[0]}`;
   const end = `${endCoords[1]},${endCoords[0]}`;
 
-  // Usamos a API 'directions'
-  const response = await fetch(`https://api.openrouteservice.org/v2/directions/driving-car?api_key=${CONFIG.ORS_API_KEY}&start=${start}&end=${end}`);
+  const response = await fetch(`https://api.openrouteservice.org/v2/directions/driving-car?api_key=${apiKey}&start=${start}&end=${end}`);
 
   if (!response.ok) {
     throw new Error('Falha ao calcular a rota.');
@@ -152,8 +119,6 @@ async function buscarRota(startCoords, endCoords) {
 
   const data = await response.json();
   const route = data.features[0];
-  
-  // Converte as coordenadas (lon, lat) para (lat, lon) para o Leaflet
   const coords = route.geometry.coordinates.map(coord => [coord[1], coord[0]]);
 
   return {
@@ -162,9 +127,11 @@ async function buscarRota(startCoords, endCoords) {
   };
 }
 
+// ----------------------------
+// Obter localização do usuário
+// ----------------------------
 function obterLocalizacaoUsuario() {
   return new Promise((resolve, reject) => {
-    // Verifica se o navegador suporta geolocalização
     if (!navigator.geolocation) {
       reject(new Error("Geolocalização não é suportada pelo seu navegador."));
       return;
@@ -172,40 +139,38 @@ function obterLocalizacaoUsuario() {
 
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        // Sucesso
         resolve({
           lat: position.coords.latitude,
           lon: position.coords.longitude
         });
       },
       (error) => {
-        // Erro
         let errorMessage = "Ocorreu um erro desconhecido.";
         switch (error.code) {
           case error.PERMISSION_DENIED:
-            errorMessage = "User denied Geolocation"; // Mensagem que aparecia antes
+            errorMessage = "Permissão de localização negada.";
             break;
           case error.POSITION_UNAVAILABLE:
             errorMessage = "Informação de localização indisponível.";
             break;
           case error.TIMEOUT:
-            errorMessage = "O pedido de localização expirou.";
+            errorMessage = "Tempo limite ao obter localização.";
             break;
         }
         reject(new Error(errorMessage));
       },
       {
-        // Opções
-        enableHighAccuracy: true, // Tenta obter a localização mais precisa
-        timeout: 10000,         // Tempo limite de 10 segundos
-        maximumAge: 0           // Não usa cache
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 0
       }
     );
   });
 }
 
-
-// Inicializar mapa com localização do usuário
+// ----------------------------
+// Inicializar o mapa
+// ----------------------------
 async function inicializarMapa() {
     try {
         setStatus('Obtendo sua localização...', 'loading');
@@ -234,7 +199,9 @@ async function inicializarMapa() {
     }
 }
 
-// Evento de clique para buscar delegacias
+// ----------------------------
+// Evento do botão "Buscar delegacias"
+// ----------------------------
 locateBtn.onclick = async () => {
     try {
         toggleButtonLoading(locateBtn, true);
@@ -245,14 +212,14 @@ locateBtn.onclick = async () => {
 
         if (delegacias.length === 0) {
             delegaciaListEl.innerHTML = '<div class="no-results">Nenhuma delegacia encontrada nesta área</div>';
-            setStatus('Nenhuma delegacia encontrada. Tente aumentar o raio de busca.', 'info');
+            setStatus('Nenhuma delegacia encontrada.', 'info');
             return;
         }
 
         delegacias.forEach(d => {
             const item = document.createElement('div');
             item.className = "list-item";
-            item.tabIndex = 0; // Tornar focável
+            item.tabIndex = 0;
             item.setAttribute('role', 'button');
             item.setAttribute('aria-label', `Selecionar ${d.nome}`);
             item.innerHTML = `<span>${d.nome}</span><span class="distance">-- km</span>`;
@@ -277,8 +244,8 @@ locateBtn.onclick = async () => {
                         [d.lat, d.lon]
                     );
                     
-                    // CORREÇÃO: LER A VARIÁVEL CSS DO TEMA ATUAL
-                    const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--cor-primaria').trim() || '#7E2A53';
+                    const primaryColor = getComputedStyle(document.documentElement)
+                        .getPropertyValue('--cor-primaria').trim() || '#7E2A53';
 
                     routeLayer = L.polyline(routeData.coords, {
                         color: primaryColor, 
@@ -321,15 +288,21 @@ locateBtn.onclick = async () => {
     }
 };
 
-// Toggle sidebar
+// ----------------------------
+// Controle da sidebar
+// ----------------------------
 toggleBtn.onclick = () => {
     sidebar.classList.toggle('collapsed');
     const isCollapsed = sidebar.classList.contains('collapsed');
     toggleBtn.innerText = isCollapsed ? "⮞" : "⮜";
     toggleBtn.setAttribute('aria-label', isCollapsed ? 'Abrir menu' : 'Fechar menu');
+
+    // 🎯 NOVO: Força o Leaflet a recalcular o tamanho do mapa após a transição da sidebar
+    setTimeout(() => { 
+        map.invalidateSize(); 
+    }, 350); 
 };
 
-// Fechar sidebar ao clicar fora (em dispositivos móveis)
 document.addEventListener('click', (e) => {
     if (window.innerWidth <= 480 &&
         !sidebar.contains(e.target) &&
@@ -338,8 +311,13 @@ document.addEventListener('click', (e) => {
         sidebar.classList.add('collapsed');
         toggleBtn.innerText = "⮞";
         toggleBtn.setAttribute('aria-label', 'Abrir menu');
+        
+        // NOVO: Chama invalidateSize no mobile também ao fechar automaticamente
+        setTimeout(() => { 
+            map.invalidateSize(); 
+        }, 350);
     }
 });
 
-// Inicializar a aplicação
+// Inicializa o mapa
 inicializarMapa();
